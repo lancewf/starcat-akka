@@ -86,6 +86,4 @@ class Descriptor(slipnetNodeType:ActorRef, slipnetNodeValue:ActorRef,
   def hasDescriptorValue(descriptorValue:ActorRef):Boolean = getDescriptorValue().equals(descriptorValue)
   
   def hasDescriptorType(descriptorType:ActorRef):Boolean = getDescriptorType().equals(descriptorType)
-
-  def describes(entity:Entity):Boolean = entity.getDescriptors().exists(_ == this)
 }

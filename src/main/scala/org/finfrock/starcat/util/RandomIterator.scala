@@ -1,9 +1,8 @@
-package org.finfrock.starcat.workspace
+package org.finfrock.starcat.util
 
-import org.finfrock.starcat.structures.Entity
 import scala.util.Random
 
-class WorkspaceIterator(val entities: List[Entity]) extends Iterator[Entity] {
+class RandomIterator[T](val entities: List[T]) extends Iterator[T] {
   private val beenSelected = Array.fill[Boolean](entities.size)(false)
   private var selectedCount: Int = 0
   private val rand = new Random()
@@ -16,17 +15,17 @@ class WorkspaceIterator(val entities: List[Entity]) extends Iterator[Entity] {
     }
   } 
 
-  def next(): Entity = {
+  def next(): T = {
     var index = rand.nextInt() % beenSelected.length
     while (beenSelected(index)) {
       index = rand.nextInt() % beenSelected.length
     }
 
     val selectedEntity = entities(index)
-    beenSelected(index) = true;
+    beenSelected(index) = true
     selectedCount += 1
 
-    return selectedEntity;
+    return selectedEntity
   }
 
   def remove() {}

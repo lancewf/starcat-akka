@@ -11,17 +11,35 @@ import akka.actor.ActorLogging
 import akka.actor.ActorRef
 import org.finfrock.starcat.codelets.CodeletActor
 import org.finfrock.starcat.codelets.Codelet
+import org.finfrock.starcat.util.RandomIterator
+import akka.pattern.{ ask, pipe }
+import scala.concurrent.duration._
+import akka.util.Timeout
+import scala.concurrent.Future
+
+object WorkspaceActor {
+  case class UpdateCoherence(coherence:Double)
+  object GetCoherence
+  case class GetCoherenceResponse(coherence:Double)
+}
 
 trait WorkspaceActor extends Component {
   // -------------------------------------------------------------------------
   // Protected Data
   // -------------------------------------------------------------------------
 
-  private var workspaceStorage = Map[Class[_], List[Entity]]()
-  private var allEntities = List[Entity]()
+  private var workspaceStorage = Map[String, List[ActorRef]]()
+  private var allEntities = List[ActorRef]()
   private var coherence = 100.0
   private val rand = new Random()
+  implicit val timeout = Timeout(5 seconds)
+  implicit val ex = context.dispatcher
 
+  override def receive = super.receive orElse {
+    case WorkspaceActor.UpdateCoherence(updatedCoherence) => coherence = updatedCoherence
+    case WorkspaceActor.GetCoherence => sender ! WorkspaceActor.GetCoherenceResponse(coherence)
+  }
+  
   // --------------------------------------------------------------------------
   // Component Members
   // --------------------------------------------------------------------------
@@ -44,15 +62,33 @@ trait WorkspaceActor extends Component {
   }
 
   def update() {
-    val sumOfAllRelevances:Long = (for { e <- allEntities } yield {
-      e.update()
-      e.getRelevance()
-    }).sum
+    case class EntityData(relevance:Int, completeness:Int)
+    allEntities.foreach(_ ! Entity.Update)
 
-    coherence = (for { e <- allEntities } yield {
-      math.round((e.getRelevance().toDouble / sumOfAllRelevances.toDouble)
-        * (100.0 - e.getCompleteness().toDouble))
-    }).sum
+    val listOfFutureEntityData = for { entity <- allEntities } yield {
+      for{relevanceResponse <- ask(entity, Entity.GetRelevance).mapTo[Entity.GetRelevanceResponse]
+      completenessResponse <- ask(entity, Entity.GetCompleteness).mapTo[Entity.GetCompletenessResponse]} yield{
+        EntityData(relevanceResponse.relevance, completenessResponse.completeness)
+      }
+    }
+    
+    val futrueListOfEntityData = Future.sequence(listOfFutureEntityData)
+    
+    val futureSumOfAllRelevances = futrueListOfEntityData.map(_.map(_.relevance.toDouble).sum)
+
+    val futureUpdateCoherence = for {
+      entityDatas <- futrueListOfEntityData
+      sumOfAllRelevances <- futureSumOfAllRelevances
+    } yield {
+      val updatingCoherence = (for { entityData <- entityDatas } yield {
+        math.round((entityData.relevance.toDouble / sumOfAllRelevances)
+          * (100.0 - entityData.completeness.toDouble))
+      }).sum
+      
+      WorkspaceActor.UpdateCoherence(updatingCoherence)
+    }
+    
+    futureUpdateCoherence.pipeTo(self)
   }
 
   // --------------------------------------------------------------------------
@@ -63,69 +99,47 @@ trait WorkspaceActor extends Component {
     * equivalent to calling getEntitiesMatching(Class, false, null)
     * 
     */
-  def getEntitiesMatching(c: Class[Entity]): List[Entity] = getEntitiesMatching(c, false)
-
-  /*
-    * With this method, one can retrieve all Entity objects in this Workspace or
-    * limit by class type
-    * 
-    * Class c object of Entity type to restrict matches to. If c is null, it
-    * will try matches on all entities regardless of type.
-    * 
-    * andSubclasses--if this is set to true then all Entities of type c or a
-    * subtype shall be considered
-    * 
-    */
-  def getEntitiesMatching(c: Class[Entity], andSubclasses: Boolean): List[Entity] = {
-    val entList = if (andSubclasses) {
-      getListForClassAndSubclasses(c)
-    } else {
-      getListForClass(c)
-    }
+  def getEntitiesMatching(entityType:String): List[ActorRef] = {
+    val entList = getListForType(entityType)
 
     if (entList == null) {
-      return List[Entity]()
+      return List[ActorRef]()
     } else {
       return entList
     }
   }
 
-  def addEntity(entity: Entity) {
+  def addEntity(entityType:String, entity: ActorRef) {
     allEntities ::= entity
-    val entList = getListForClass(entity.getClass)
+    val entList = getListForType(entityType)
 
-    workspaceStorage += entity.getClass() -> (entity :: entList)
+    workspaceStorage += entityType -> (entity :: entList)
   }
 
-  def removeEntity(entity: Entity): Boolean = {
+  def removeEntity(entityType:String, entity: ActorRef): Boolean = {
     allEntities = allEntities.filterNot { x => x == entity }
 
-    val entList = getListForClass(entity.getClass())
-    entity.setChangedAndNotify()
-    entity.deleteObservers()
+    val entList = getListForType(entityType)
+    entity ! Entity.SetChangedAndNotify(null)
+    entity ! Entity.DeleteObservers
 
-    workspaceStorage += entity.getClass() -> entList.filterNot { e => e == entity }
+    workspaceStorage += entityType -> entList.filterNot { e => e == entity }
 
     return true
   }
 
-  def containsEntity(entity: Entity): Boolean = {
-    val entList = getListForClass(entity.getClass())
+  def containsEntity(entityType:String, entity: Entity): Boolean = {
+    val entList = getListForType(entityType)
     return entList.contains(entity)
   }
 
-  def getObjectBySalience(c: Class[Entity]): Item = {
-    val list = getEntitiesMatching(c)
+  def getObjectBySalience(entityType:String): Future[ActorRef] = {
+    val list = getEntitiesMatching(entityType)
     return getObjectBySalienceFromList(list)
   }
 
-  def getTotallyRandomObject(): Item = {
-    return getObjectBySalienceFromList(allEntities);
-  }
-
-  def getObjectBySalience(c: Class[Entity], andSubclasses: Boolean): Item = {
-    val list = getEntitiesMatching(c, andSubclasses)
-    return getObjectBySalienceFromList(list)
+  def getTotallyRandomObject(): Future[ActorRef] = {
+    return getObjectBySalienceFromList(allEntities)
   }
 
   // --------------------------------------------------------------------------
@@ -138,37 +152,44 @@ trait WorkspaceActor extends Component {
     * 
     * returns modifiable List of Entity objects
     */
-  private def getListForClass(className: Class[_]): List[Entity] = {
-    workspaceStorage.get(className) match {
+  private def getListForType(entityType: String): List[ActorRef] = {
+    workspaceStorage.get(entityType) match {
       case Some(entities) => entities
       case None           => Nil
     }
   }
 
-  private def getListForClassAndSubclasses(c: Class[Entity]): List[Entity] = {
-    (for {
-      cls <- workspaceStorage.keys
-      if (c.isAssignableFrom(cls))
-    } yield {
-      workspaceStorage(cls)
-    }).flatten.toList
-  }
-
-  private def getObjectBySalienceFromList(list: List[Entity]): Item = {
-    val sum = list.map(_.getSalience()).sum
-
-    val stopVal = rand.nextInt(sum + 1)
-
-    val it = new WorkspaceIterator(list)
-
-    var salienceEntity: Entity = null
-    var salienceSum = 0
-
-    while (it.hasNext() && salienceSum < stopVal) {
-      salienceEntity = it.next()
-      salienceSum += salienceEntity.getSalience()
+  private def getObjectBySalienceFromList(list: List[ActorRef]): Future[ActorRef] = {
+    case class EntitySalience(entity:ActorRef, salience:Int)
+    val listOfFutureEntitySalience = for { entity <- allEntities } yield {
+      for{salienceResponse <- ask(entity, Entity.GetSalience).mapTo[Entity.GetSalienceResponse]} yield{
+        EntitySalience(entity, salienceResponse.salience)
+      }
     }
+     
+    val futrueListOfEntitySalience = Future.sequence(listOfFutureEntitySalience)
+    
+    val futureSumOfAllSalience = futrueListOfEntitySalience.map(_.map(_.salience).sum)
 
-    return salienceEntity.asInstanceOf[Item]
+    val futureEntity = for {
+      listOfEntitySalience <- futrueListOfEntitySalience
+      sumOfAllSalience <- futureSumOfAllSalience
+    } yield {
+      val stopVal = rand.nextInt(sumOfAllSalience + 1)
+
+      val it = new RandomIterator(listOfEntitySalience)
+
+      var salienceEntity: EntitySalience = null
+      var salienceSum = 0
+
+      while (it.hasNext() && salienceSum < stopVal) {
+        salienceEntity = it.next()
+        salienceSum += salienceEntity.salience
+      }
+
+      salienceEntity.entity
+    }
+    
+    futureEntity
   }
 }
