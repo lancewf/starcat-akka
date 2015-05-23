@@ -1,5 +1,5 @@
 # starcat-akka
-Scala akka version of starcat. Using Actors and futures this turns the starcat system into a reactive system.
+This project is a scala akka version of starcat. Using Actors and futures this turns the starcat system into a reactive system.
 
 Starcat is a framework which was created by Dr. Joseph Lewis to provide the basic
 functionality of the Copycat program; it allows other domains to utilize the essential
